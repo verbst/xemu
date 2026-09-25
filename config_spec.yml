@@ -373,3 +373,143 @@ perf:
   cache_shaders:
     type: bool
     default: true
+
+# Streaming output to a MiSTer FPGA acting as an analog GPU for CRT displays.
+#
+# Section names are unique across this whole file on purpose: the generated
+# header declares nested structs with named tags, and C keeps all struct tags
+# in one namespace, so reusing "video", "audio" or "input" here would clash
+# with the sections of those names above.
+groovy:
+  enable:
+    type: bool
+    default: false
+  host:
+    type: string
+    default: 192.168.100.2
+  port:
+    type: integer
+    default: 32100
+  # Keep drawing to the xemu window while streaming.
+  mirror:
+    type: bool
+    default: true
+  auto_reconnect:
+    type: bool
+    default: true
+  log_level:
+    type: integer
+    default: 0
+
+  # Wire format. Changing any of these requires tearing the session down and
+  # reconnecting, not just re-sending a modeline.
+  stream:
+    codec:
+      type: enum
+      values: [raw, lz4, lz4_delta, lz4hc, lz4hc_delta, lz4_adaptive,
+               lz4_adaptive_delta, nlc]
+      default: nlc
+    # NLC is RGB888-only; the core refuses the session in any other mode.
+    rgb_mode:
+      type: enum
+      values: [rgb888, rgba888, rgb565]
+      default: rgb888
+    nlc_near_level:
+      type: integer
+      default: 1
+    # Rice needs a Rice-capable core and cannot be detected at runtime.
+    nlc_pack:
+      type: enum
+      values: [tiled, rice]
+      default: rice
+    mtu:
+      type: enum
+      values: ['1500', '3800']
+      default: '1500'
+
+  # Mode selection. Changing any of these forces a fresh resolve.
+  modeline:
+    monitor:
+      type: enum
+      values: [arcade_15, arcade_15ex, arcade_15_25, arcade_15_31,
+               arcade_15_25_31, arcade_25, arcade_31, generic_15, ntsc, pal,
+               vesa_480, vesa_600, vesa_768, vesa_1024, custom]
+      default: arcade_15
+    monitor_custom:
+      type: string
+      default: ''
+    # What to give up when the monitor cannot supply both. Keeping the refresh
+    # rate preserves emulation speed; keeping the resolution slows the guest.
+    mode_priority:
+      type: enum
+      values: [keep_refresh, keep_resolution]
+      default: keep_refresh
+    # Percent of refresh error tolerated under keep_resolution; 0 is unlimited.
+    keep_resolution_limit:
+      type: integer
+      default: 1
+    scan_mode:
+      type: enum
+      values: [auto, progressive_only]
+      default: auto
+    aspect:
+      type: enum
+      values: [follow_guest, force_4x3, force_16x9]
+      default: follow_guest
+    target_refresh:
+      type: enum
+      values: [auto, ntsc_5994, exact_60, pal_50]
+      default: auto
+    interlaced_fb:
+      type: bool
+      default: false
+
+  timing:
+    # Following the display is the tested path: it gives the guest exactly one
+    # frame per frame the display scans. Independent clocks remain available
+    # for a setup where that misbehaves, but they beat against each other and
+    # sample the picture at an unrelated moment.
+    pacing:
+      type: enum
+      values: [two_clock, single_clock]
+      default: single_clock
+    # Raster line to aim for; 0 selects automatic frame delay.
+    vsync_line:
+      type: integer
+      default: 0
+    fd_margin_ms:
+      type: number
+      default: 0
+    # Sleep this much of the frame period before the sync spin, trading a
+    # slightly later sync line for CPU. 0 spins for the whole wait.
+    spin_reduction_ms:
+      type: number
+      default: 0
+
+  sound:
+    enable:
+      type: bool
+      default: true
+    # Both 'muted' and 'disabled' keep the host audio stream open at zero gain;
+    # while streaming the APU is paced by the display, otherwise by that stream.
+    local_output:
+      type: enum
+      values: [enabled, muted, disabled]
+      default: muted
+    # Audio held on the MiSTer ahead of playback, so a late frame does not
+    # leave a gap in it. Adds the same amount of latency.
+    buffer_ms:
+      type: enum
+      values: ['0', '16', '32', '64', '128']
+      default: '64'
+
+  controls:
+    pads:
+      type: bool
+      default: true
+    rumble:
+      type: bool
+      default: true
+    ps2_drives_ui:
+      type: bool
+      default: false

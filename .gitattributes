@@ -1,3 +1,11 @@
+# The repository stores LF. Pin the working tree to LF too, so a checkout made
+# on Windows cannot reintroduce CRLF. Shell scripts are the reason this matters:
+# a CRLF shebang makes the kernel look for an interpreter named "bash\r", and
+# both WSL and MSYS2 then fail with an error that names neither the file nor the
+# cause. Binary files are excluded automatically by content detection, and the
+# more specific rules below still override this one.
+* text=auto eol=lf
+
 *.c.inc         diff=c
 *.h.inc         diff=c
 *.m             diff=objc

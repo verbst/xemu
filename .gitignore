@@ -26,3 +26,6 @@ build.log
 /macos-libs/
 /macos-pkgs/
 /xemu.iconset/
+
+# Local working notes
+.notes/

@@ -5,6 +5,7 @@ pfiles = [
   'logo_sdf.png',
   'xemu_64x64.png',
   'abxy.ttf',
+  'mister_kun.otf',  # Regenerate with scripts/gen-mister-kun-font.py
   'Roboto-Medium.ttf',
   'RobotoCondensed-Regular.ttf',
   'font_awesome_6_1_1_solid.min.otf',  # Update glyphs with scripts/gen-min-fa-font.sh

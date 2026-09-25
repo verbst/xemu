@@ -29,6 +29,7 @@
 #include "qemu/config-file.h"
 
 #include "xemu-input.h"
+#include "groovy/groovy.h"
 #include "xemu-notifications.h"
 #include "xemu-settings.h"
 #include <stdio.h>
@@ -167,10 +168,17 @@ static void check_and_reset_in_range(int *btn, int min, int max,
 
 static void xemu_input_bindings_set_in_range(ControllerState *con)
 {
+    /* A MiSTer pad's mapping indexes positions on the wire rather than SDL's
+     * button and axis numbering, so the bounds differ by device. */
+    bool groovy = con->type == INPUT_DEVICE_GROOVY_MISTER;
+    int button_count =
+        groovy ? GROOVY_PAD_BUTTON_COUNT : SDL_GAMEPAD_BUTTON_COUNT;
+    int axis_count = groovy ? GROOVY_PAD_AXIS_COUNT : SDL_GAMEPAD_AXIS_COUNT;
+
 #define CHECK_RESET_BUTTON(btn)                                            \
     check_and_reset_in_range(&con->controller_map->controller_mapping.btn, \
                              SDL_GAMEPAD_BUTTON_INVALID,                   \
-                             SDL_GAMEPAD_BUTTON_COUNT,                     \
+                             button_count,                                 \
                              "Invalid entry for button " #btn ", resetting")
 
     CHECK_RESET_BUTTON(a);
@@ -194,8 +202,8 @@ static void xemu_input_bindings_set_in_range(ControllerState *con)
 #define CHECK_RESET_AXIS(axis)                                              \
     check_and_reset_in_range(&con->controller_map->controller_mapping.axis, \
                              SDL_GAMEPAD_AXIS_INVALID,                      \
-                             SDL_GAMEPAD_AXIS_COUNT,                        \
-                             "Invalid entry for button " #axis ", resetting")
+                             axis_count,                                    \
+                             "Invalid entry for axis " #axis ", resetting")
 
     CHECK_RESET_AXIS(axis_trigger_left);
     CHECK_RESET_AXIS(axis_trigger_right);
@@ -207,14 +215,20 @@ static void xemu_input_bindings_set_in_range(ControllerState *con)
 #undef CHECK_RESET_AXIS
 }
 
-static void xemu_input_bindings_reload_map(ControllerState *con)
+bool xemu_input_controller_has_mapping(ControllerState *con)
 {
-    assert(con->type == INPUT_DEVICE_SDL_GAMEPAD);
+    return con->type == INPUT_DEVICE_SDL_GAMEPAD ||
+           con->type == INPUT_DEVICE_GROOVY_MISTER;
+}
+
+bool xemu_input_bindings_reload_map(ControllerState *con)
+{
+    assert(xemu_input_controller_has_mapping(con));
 
     char guid[35] = { 0 };
-    SDL_GUIDToString(con->sdl_joystick_guid, guid, sizeof(guid));
+    xemu_input_get_controller_identity(con, guid, sizeof(guid));
     if (!xemu_settings_load_gamepad_mapping(guid, &con->controller_map)) {
-        return;
+        return false;
     }
 
     // If this controller did not exist in the mapping array, the config will
@@ -223,12 +237,11 @@ static void xemu_input_bindings_reload_map(ControllerState *con)
     ControllerState *iter, *next;
     bool is_new_mapping;
     QTAILQ_FOREACH_SAFE (iter, &available_controllers, entry, next) {
-        if (iter == con || iter->type != INPUT_DEVICE_SDL_GAMEPAD) {
+        if (iter == con || !xemu_input_controller_has_mapping(iter)) {
             continue;
         }
 
-        memset(guid, 0, sizeof(guid));
-        SDL_GUIDToString(iter->sdl_joystick_guid, guid, sizeof(guid));
+        xemu_input_get_controller_identity(iter, guid, sizeof(guid));
 
         is_new_mapping =
             xemu_settings_load_gamepad_mapping(guid, &iter->controller_map);
@@ -237,6 +250,8 @@ static void xemu_input_bindings_reload_map(ControllerState *con)
 
         xemu_input_bindings_set_in_range(iter);
     }
+
+    return true;
 }
 
 static const char *get_bound_driver(int port)
@@ -310,14 +325,29 @@ void xemu_input_init(void)
     QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
 }
 
+void xemu_input_get_controller_identity(ControllerState *state, char *buf,
+                                        size_t len)
+{
+    assert(len >= 35);
+    memset(buf, 0, len);
+
+    if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
+        SDL_GUIDToString(state->sdl_joystick_guid, buf, len);
+    } else if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
+        snprintf(buf, len, "keyboard");
+    } else if (state->type == INPUT_DEVICE_GROOVY_MISTER) {
+        /* A stable name so a MiSTer pad returns to the same port, and to the
+         * same button mapping, between sessions -- the way the keyboard does.
+         * There is no hardware identity to use: the pad is whatever happens to
+         * be plugged into the display, and only its position is ours to know. */
+        snprintf(buf, len, "groovy%d", state->sdl_joystick_id + 1);
+    }
+}
+
 int xemu_input_get_controller_default_bind_port(ControllerState *state, int start)
 {
     char guid[35] = { 0 };
-    if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
-        SDL_GUIDToString(state->sdl_joystick_guid, guid, sizeof(guid));
-    } else if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
-        snprintf(guid, sizeof(guid), "keyboard");
-    }
+    xemu_input_get_controller_identity(state, guid, sizeof(guid));
 
     for (int i = start; i < 4; i++) {
         if (strcmp(guid, *port_index_to_settings_key_map[i]) == 0) {
@@ -491,6 +521,9 @@ void xemu_input_update_controller(ControllerState *state)
         xemu_input_update_sdl_kbd_controller_state(state);
     } else if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
         xemu_input_update_sdl_controller_state(state);
+    } else if (state->type == INPUT_DEVICE_GROOVY_MISTER) {
+        /* Nothing to poll. The buttons and axes are written directly by the
+         * frame loop as packets arrive, so there is no device to read here. */
     }
 
     state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
@@ -628,6 +661,16 @@ void xemu_input_update_sdl_controller_state(ControllerState *state)
 
 void xemu_input_update_rumble(ControllerState *state)
 {
+    if (state->type == INPUT_DEVICE_GROOVY_MISTER) {
+        /* Recorded here and sent once per frame. The guest updates the motors
+         * on every control transfer, several times per displayed frame, and
+         * each motor separately -- so forwarding each write as it happens
+         * would send a stream of intermediate states, including ones where a
+         * stop has been applied to only one motor. */
+        groovy_input_note_rumble(state->bound, state->rumble_l, state->rumble_r);
+        return;
+    }
+
     if (state->type != INPUT_DEVICE_SDL_GAMEPAD) {
         return;
     }
@@ -939,9 +982,14 @@ int xemu_input_get_test_mode(void)
 
 void xemu_input_reset_input_mapping(ControllerState *state)
 {
-    if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
+    if (state->type == INPUT_DEVICE_GROOVY_MISTER) {
+        /* The stored defaults describe a locally attached pad, so restoring a
+         * MiSTer pad means writing its own layout back over them. The module
+         * that knows that layout does both halves. */
+        groovy_input_reset_mapping(state->sdl_joystick_id);
+    } else if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
         char guid[35] = { 0 };
-        SDL_GUIDToString(state->sdl_joystick_guid, guid, sizeof(guid));
+        xemu_input_get_controller_identity(state, guid, sizeof(guid));
         xemu_settings_reset_controller_mapping(guid);
     } else if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
         xemu_settings_reset_keyboard_mapping();

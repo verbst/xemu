@@ -26,6 +26,8 @@
 #include <assert.h>
 #include <fpng.h>
 
+#include "ui/groovy/groovy.h"
+
 #include <deque>
 #include <vector>
 #include <string>
@@ -327,8 +329,11 @@ void xemu_hud_render()
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    if (g_vsync != g_config.display.window.vsync) {
-        g_vsync = g_config.display.window.vsync;
+    /* Tracks the effective value, not the stored setting: streaming forces
+     * vsync off without disturbing what the user chose, so their preference
+     * comes back when streaming stops. */
+    if (g_vsync != xemu_vsync_effective()) {
+        g_vsync = xemu_vsync_effective();
         SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
     }
 

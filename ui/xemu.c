@@ -48,6 +48,8 @@
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
+#include "groovy/groovy.h"
+#include "groovy/groovy-diagnostics.h"
 
 #include "data/xemu_64x64.png.h"
 
@@ -72,6 +74,22 @@
 
 uint64_t vblank_interval_ns = 16666666LL;
 bool use_vblank_timer_thread = true;
+
+/*
+ * When something else is driving the guest's frame timing, the timer below
+ * stands down rather than adding a second source. It keeps watching, though:
+ * if the external driver stops stamping vblank_last_external_ns it takes over
+ * again, so the guest can never be left with no vblank at all. That matters
+ * because the presentation loop, which is what drives it, stops entirely while
+ * a window is being dragged.
+ */
+bool vblank_externally_driven;
+int64_t vblank_last_external_ns;
+
+/* Which source actually delivered each vblank, for confirming that exactly one
+ * of them is running at a time. */
+uint64_t vblank_count_timer;
+uint64_t vblank_count_external;
 
 struct xemu_console {
     DisplayChangeListener dcl;
@@ -738,6 +756,20 @@ static void process_vblank(struct xemu_console *scon)
     graphic_hw_update(scon->dcl.con);
 }
 
+void xemu_process_vblank_now(void)
+{
+    struct xemu_console *scon = &scon_list[0];
+
+    qatomic_set__nocheck(&vblank_last_external_ns,
+                         qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    qatomic_set__nocheck(&vblank_count_external,
+                         qatomic_read__nocheck(&vblank_count_external) + 1);
+
+    xemu_main_loop_lock();
+    process_vblank(scon);
+    xemu_main_loop_unlock();
+}
+
 static void vblank_timer_callback(void *opaque)
 {
     struct xemu_console *scon = (struct xemu_console *)opaque;
@@ -753,6 +785,23 @@ static void *vblank_timer_thread(void *opaque)
     int64_t next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     while (!qatomic_read(&qemu_exiting)) {
+        if (qatomic_read(&vblank_externally_driven)) {
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            int64_t last = qatomic_read__nocheck(&vblank_last_external_ns);
+            int64_t stale_after = 3 * (int64_t)qatomic_read(&vblank_interval_ns);
+
+            if (last != 0 && now - last < stale_after) {
+                /* Someone else is delivering vblanks on time. Idle, and
+                 * re-arm the deadline so taking over again does not fire a
+                 * burst of catch-up frames. */
+                SDL_DelayPrecise(2000000);
+                next_vblank = now;
+                continue;
+            }
+            /* Nothing has arrived for several frames. Drive it ourselves
+             * rather than let the guest stall. */
+        }
+
         // Schedule next vblank at fixed interval (absolute deadline)
         next_vblank += vblank_interval_ns;
 
@@ -767,6 +816,8 @@ static void *vblank_timer_thread(void *opaque)
         }
 
         if (!qatomic_read(&qemu_exiting)) {
+            qatomic_set__nocheck(&vblank_count_timer,
+                                 qatomic_read__nocheck(&vblank_count_timer) + 1);
             xemu_main_loop_lock();
             process_vblank(scon);
             xemu_main_loop_unlock();
@@ -803,7 +854,7 @@ static void report_stats(void)
 static void gl_render_frame(struct xemu_console *scon)
 {
     static bool rendering;
-    if (qatomic_xchg(&rendering, true) || qatomic_read(&qemu_exiting)) {
+    if (qatomic_read(&qemu_exiting) || qatomic_xchg(&rendering, true)) {
         return;
     }
 
@@ -822,9 +873,20 @@ static void gl_render_frame(struct xemu_console *scon)
      * the guest code isn't using HW accelerated rendering, but just blitting
      * to the framebuffer, fall back to the VGA path.
      */
-    GLuint tex = nv2a_get_framebuffer_surface();
+    int64_t acquire_start = groovy_diag_begin();
+    int tex = nv2a_get_framebuffer_surface_timeout(groovy_acquire_budget_ns());
+    groovy_diag_stage(GROOVY_DIAG_ACQUIRE, acquire_start);
 
     assert(glGetError() == GL_NO_ERROR);
+
+    if (tex < 0) {
+        /* The renderer is still on this frame. Repeat the last one on the
+         * stream and leave the window as it is, so the pacing, the audio and
+         * the guest's timing carry on without it. */
+        groovy_frame_repeat();
+        qatomic_set(&rendering, false);
+        return;
+    }
 
     if (tex == 0) {
         xemu_main_loop_lock();
@@ -833,13 +895,26 @@ static void gl_render_frame(struct xemu_console *scon)
         tex = scon->surface->texture;
         flip_required = true;
         release_surface_texture = true;
+        groovy_set_fallback_geometry(surface_width(scon->surface),
+                                     surface_height(scon->surface));
         xemu_main_loop_unlock();
     }
 
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
     xemu_snapshots_set_framebuffer_texture(tex, flip_required);
-    xemu_hud_set_framebuffer_texture(tex, flip_required);
+
+    /* Get the frame on the wire before spending anything on the local window,
+     * so that drawing the window overlaps the transfer instead of delaying it.
+     */
+    groovy_frame_captured(tex, flip_required);
+
+    int64_t present_start = groovy_diag_begin();
+
+    /* With the mirror off the window keeps running, so its menus stay usable,
+     * but it stops drawing the emulated frame. */
+    xemu_hud_set_framebuffer_texture(groovy_mirror_enabled() ? tex : 0,
+                                     flip_required);
 
     /* FIXME: Finer locking. Event handlers in segments of the code expect
      * to be running on the main thread with the BQL. For now, acquire the
@@ -861,6 +936,7 @@ static void gl_render_frame(struct xemu_console *scon)
 
     nv2a_release_framebuffer_surface();
     SDL_GL_SwapWindow(scon->real_window);
+    groovy_diag_stage(GROOVY_DIAG_PRESENT, present_start);
     assert(glGetError() == GL_NO_ERROR);
 
     qatomic_set(&rendering, false);
@@ -870,13 +946,44 @@ static void gl_render_frame(struct xemu_console *scon)
 #endif
 }
 
+static SDL_ThreadID frame_service_thread;
+static bool frame_service_active;
+static bool frame_polling_events;
+
+static void service_frame(struct xemu_console *scon, bool live_resize)
+{
+    if (SDL_GetCurrentThreadID() !=
+            qatomic_read__nocheck(&frame_service_thread) ||
+        qatomic_read(&qemu_exiting) || bql_locked() ||
+        qatomic_xchg(&frame_service_active, true)) {
+        return;
+    }
+
+    int64_t start = groovy_diag_begin();
+    gl_render_frame(scon);
+    groovy_frame_step();
+    groovy_diag_service(start, live_resize);
+    qatomic_set(&frame_service_active, false);
+}
+
 static bool event_watch_callback(void *userdata, SDL_Event *event)
 {
     struct xemu_console *scon = (struct xemu_console *)userdata;
 
     if (event->type == SDL_EVENT_WINDOW_EXPOSED ||
         event->type == SDL_EVENT_WINDOW_RESIZED) {
-        gl_render_frame(scon);
+        if (groovy_is_streaming()) {
+            /* SDL marks live-resize timer redraws with data1 == 1. They run
+             * inside PollEvent while the normal frame loop is suspended. */
+            if (event->type == SDL_EVENT_WINDOW_EXPOSED &&
+                event->window.data1 == 1 &&
+                event->window.windowID == SDL_GetWindowID(scon->real_window) &&
+                qatomic_read(&frame_polling_events)) {
+                service_frame(scon, true);
+            }
+        } else {
+            gl_render_frame(scon);
+        }
     }
 
     return true; // Ignored
@@ -1092,7 +1199,7 @@ static void display_early_init(DisplayOptions *o)
     display_opengl = 1;
 
     SDL_GL_MakeCurrent(m_window, m_context);
-    SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
+    SDL_GL_SetSwapInterval(xemu_vsync_effective() ? 1 : 0);
     xemu_hud_init(m_window, m_context);
 }
 
@@ -1364,11 +1471,24 @@ int main(int argc, char **argv)
     xemu_input_init();
     xemu_main_loop_unlock();
 
-    struct xemu_console *scon = &scon_list[0];
-    while (!qatomic_read(&qemu_exiting)) {
-        poll_events(scon);
-        gl_render_frame(scon);
+    if (getenv("XEMU_GROOVY_SELFTEST")) {
+        groovy_selftest();
     }
+
+    struct xemu_console *scon = &scon_list[0];
+    qatomic_set__nocheck(&frame_service_thread, SDL_GetCurrentThreadID());
+    while (!qatomic_read(&qemu_exiting)) {
+        groovy_diag_poll_begin();
+        qatomic_set(&frame_polling_events, true);
+        poll_events(scon);
+        qatomic_set(&frame_polling_events, false);
+        groovy_diag_poll_end();
+        int64_t session_start = groovy_diag_begin();
+        groovy_update_session();
+        groovy_diag_stage(GROOVY_DIAG_SESSION, session_start);
+        service_frame(scon, false);
+    }
+    groovy_shutdown();
     qemu_sem_post(&display_shutdown_sem);
     qemu_thread_join(&thread);
     display_finalize();

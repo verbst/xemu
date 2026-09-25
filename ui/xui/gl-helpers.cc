@@ -116,7 +116,9 @@ Fbo::~Fbo()
 
 void Fbo::Target()
 {
-    GLint vp[4];
+    /* Saves into the class member, which Restore() reads back. Declaring a
+     * local of the same name here discarded the saved viewport and left
+     * Restore() applying whatever the member happened to hold. */
     glGetIntegerv(GL_VIEWPORT, vp);
 
     original_fbo = GetCurrentFbo();
