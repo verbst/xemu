@@ -24,6 +24,7 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/util.h"
 #include "renderer.h"
+#include "ui/groovy/groovy-diagnostics.h"
 
 #include <math.h>
 
@@ -287,8 +288,16 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
     d->vga.get_params(&d->vga, &vga_display_params);
     int line_offset = vga_display_params.line_offset ? surface->pitch / vga_display_params.line_offset : 1;
 
+    bool interlaced =
+        d->vga.cr[NV_PRMCIO_INTERLACE_MODE] != NV_PRMCIO_INTERLACE_MODE_DISABLED;
+
+    /* Publish before the adjustments below, which are about sizing our own
+     * render target rather than describing the mode the guest asked for. */
+    pgraph_publish_display_geometry(width, height, interlaced,
+                                    pg->surface_scale_factor);
+
     /* Adjust viewport height for interlaced mode, used only in 1080i */
-    if (d->vga.cr[NV_PRMCIO_INTERLACE_MODE] != NV_PRMCIO_INTERLACE_MODE_DISABLED) {
+    if (interlaced) {
         height *= 2;
     }
 
@@ -379,7 +388,7 @@ void pgraph_gl_sync(NV2AState *d)
 
     SurfaceBinding *surface = pgraph_gl_surface_get_within(d, d->pcrtc.start + vga_display_params.line_offset);
     if (surface == NULL || !surface->color || !surface->width || !surface->height) {
-        qemu_event_set(&d->pgraph.sync_complete);
+        pgraph_sync_done(d);
         return;
     }
 
@@ -399,16 +408,24 @@ void pgraph_gl_sync(NV2AState *d)
     /* Switch back to original context */
     glo_set_current(g_nv2a_context_render);
 
-    qatomic_set(&d->pgraph.sync_pending, false);
-    qemu_event_set(&d->pgraph.sync_complete);
+    pgraph_sync_done(d);
 }
 
-int pgraph_gl_get_framebuffer_surface(NV2AState *d)
+int pgraph_gl_get_framebuffer_surface(NV2AState *d, int64_t timeout_ns)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    int64_t diagnostic_start = groovy_diag_begin();
+    if (timeout_ns >= 0) {
+        if (qemu_mutex_trylock(&d->pfifo.lock)) {
+            groovy_diag_stage(GROOVY_DIAG_FIFO_LOCK, diagnostic_start);
+            return -1;
+        }
+    } else {
+        qemu_mutex_lock(&d->pfifo.lock);
+    }
+    groovy_diag_stage(GROOVY_DIAG_FIFO_LOCK, diagnostic_start);
     // FIXME: Possible race condition with pgraph, consider lock
 
     VGADisplayParams vga_display_params;
@@ -430,11 +447,12 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d)
         );
 
     surface->frame_time = pg->frame_time;
-    qemu_event_reset(&d->pgraph.sync_complete);
     qatomic_set(&pg->sync_pending, true);
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);
-    qemu_event_wait(&d->pgraph.sync_complete);
+    if (!pgraph_sync_wait(d, timeout_ns)) {
+        return -1;
+    }
 
     return r->gl_display_buffer;
 }

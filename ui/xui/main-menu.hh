@@ -115,6 +115,16 @@ public:
     void DrawUdpOptions(bool appearing);
 };
 
+class MainMenuMisterView : public virtual MainMenuTabView
+{
+protected:
+    char host[64];
+
+public:
+    MainMenuMisterView();
+    void Draw() override;
+};
+
 class MainMenuSnapshotsView : public virtual MainMenuTabView
 {
 protected:
@@ -182,7 +192,8 @@ protected:
                                     m_network_button,
                                     m_snapshots_button,
                                     m_system_button,
-                                    m_about_button;
+                                    m_about_button,
+                                    m_mister_button;
     std::vector<MainMenuTabView*>   m_views;
     MainMenuGeneralView             m_general_view;
     MainMenuInputView               m_input_view;
@@ -192,6 +203,7 @@ protected:
     MainMenuSnapshotsView           m_snapshots_view;
     MainMenuSystemView              m_system_view;
     MainMenuAboutView               m_about_view;
+    MainMenuMisterView              m_mister_view;
 
 
 public:

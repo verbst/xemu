@@ -130,7 +130,7 @@ typedef struct PGRAPHRenderer {
         void (*surface_update)(NV2AState *d, bool upload, bool color_write, bool zeta_write);
         void (*set_surface_scale_factor)(NV2AState *d, unsigned int scale);
         unsigned int (*get_surface_scale_factor)(NV2AState *d);
-        int (*get_framebuffer_surface)(NV2AState *d);
+        int (*get_framebuffer_surface)(NV2AState *d, int64_t timeout_ns);
         GPUProperties *(*get_gpu_properties)(void);
     } ops;
 } PGRAPHRenderer;
@@ -249,7 +249,8 @@ typedef struct PGRAPHState {
     QemuEvent flush_complete;
 
     bool sync_pending;
-    QemuEvent sync_complete;
+    QemuMutex sync_lock;
+    QemuCond sync_cond;
 
     bool framebuffer_in_use;
     QemuCond framebuffer_released;
@@ -386,6 +387,23 @@ static inline void pgraph_apply_scaling_factor(PGRAPHState *pg,
     *width *= pg->surface_scale_factor;
     *height *= pg->surface_scale_factor;
 }
+
+/*
+ * Record the video mode the guest programmed, in the guest's own terms: called
+ * from each renderer's display path with the dimensions read from the CRTC,
+ * before interlace doubling and before the surface scale is applied.
+ */
+void pgraph_publish_display_geometry(unsigned int width, unsigned int height,
+                                     bool interlaced, unsigned int scale);
+
+/*
+ * Compositing the display surface is requested by the UI thread and done by
+ * the renderer thread. The renderer reports completion here; the requester
+ * waits with pgraph_sync_wait, which returns false if the deadline passes
+ * first and leaves the request standing.
+ */
+void pgraph_sync_done(NV2AState *d);
+bool pgraph_sync_wait(NV2AState *d, int64_t timeout_ns);
 
 void pgraph_get_clear_color(PGRAPHState *pg, float rgba[4]);
 void pgraph_get_clear_depth_stencil_value(PGRAPHState *pg, float *depth, int *stencil);

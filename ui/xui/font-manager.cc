@@ -23,6 +23,7 @@
 #include "data/RobotoCondensed-Regular.ttf.h"
 #include "data/font_awesome_6_1_1_solid.min.otf.h"
 #include "data/abxy.ttf.h"
+#include "data/mister_kun.otf.h"
 
 FontManager g_font_mgr;
 
@@ -88,6 +89,26 @@ void FontManager::Rebuild()
         io.Fonts->AddFontFromMemoryTTF((void *)font_awesome_6_1_1_solid_min_data,
                                        font_awesome_6_1_1_solid_min_size,
                                        18.0f * scale,
+                                       &config, icon_ranges);
+    }
+    {
+        /*
+         * Sized against the Font Awesome icons rather than to match them: the
+         * mascot is a solid mark where those are mostly outline, so filling
+         * the same box would make it read as the largest thing in the column.
+         * It is merged a little larger in points and lands a little smaller in
+         * ink. The minimum advance is theirs, so every tab's label starts at
+         * the same place.
+         */
+        ImFontConfig config;
+        config.FontDataOwnedByAtlas = false;
+        config.RasterizerDensity = pixel_density;
+        config.MergeMode = true;
+        config.GlyphMinAdvanceX = 32.0f * scale;
+        static const ImWchar icon_ranges[] = { 0xf904, 0xf904, 0 };
+        io.Fonts->AddFontFromMemoryTTF((void *)mister_kun_data,
+                                       mister_kun_size,
+                                       22.0f * scale,
                                        &config, icon_ranges);
     }
     {

@@ -1077,8 +1077,16 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     unsigned int width = 0, height = 0;
     d->vga.get_resolution(&d->vga, (int *)&width, (int *)&height);
 
+    bool interlaced =
+        d->vga.cr[NV_PRMCIO_INTERLACE_MODE] != NV_PRMCIO_INTERLACE_MODE_DISABLED;
+
+    /* Publish before the adjustments below, which are about sizing our own
+     * render target rather than describing the mode the guest asked for. */
+    pgraph_publish_display_geometry(width, height, interlaced,
+                                    pg->surface_scale_factor);
+
     /* Adjust viewport height for interlaced mode, used only in 1080i */
-    if (d->vga.cr[NV_PRMCIO_INTERLACE_MODE] != NV_PRMCIO_INTERLACE_MODE_DISABLED) {
+    if (interlaced) {
         height *= 2;
     }
 

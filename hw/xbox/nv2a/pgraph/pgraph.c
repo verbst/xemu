@@ -24,6 +24,7 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-settings.h"
+#include "ui/groovy/groovy-diagnostics.h"
 #include "util.h"
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
@@ -222,7 +223,8 @@ void pgraph_init(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     qemu_mutex_init(&pg->lock);
     qemu_mutex_init(&pg->renderer_lock);
-    qemu_event_init(&pg->sync_complete, false);
+    qemu_mutex_init(&pg->sync_lock);
+    qemu_cond_init(&pg->sync_cond);
     qemu_event_init(&pg->flush_complete, false);
     qemu_cond_init(&pg->framebuffer_released);
     qemu_event_init(&pg->renderer_switch_complete, false);
@@ -354,21 +356,122 @@ void pgraph_destroy(PGRAPHState *pg)
     qemu_mutex_destroy(&pg->lock);
 }
 
-int nv2a_get_framebuffer_surface(void)
+/*
+ * Published by whichever renderer composited the frame, read by the UI thread.
+ * Guarded by a sequence counter rather than a lock: the writer runs on the
+ * renderer thread once per composite, and a reader that catches a torn value
+ * sees a seq it has not seen before and reads again on the next frame.
+ */
+static NV2ADisplayGeometry g_display_geometry;
+
+void pgraph_publish_display_geometry(unsigned int width, unsigned int height,
+                                     bool interlaced, unsigned int scale)
+{
+    NV2ADisplayGeometry g = {
+        .width = width,
+        .height = height,
+        .interlaced = interlaced ? 1 : 0,
+        .scale = scale,
+    };
+
+    if (g.width == qatomic_read(&g_display_geometry.width) &&
+        g.height == qatomic_read(&g_display_geometry.height) &&
+        g.interlaced == qatomic_read(&g_display_geometry.interlaced) &&
+        g.scale == qatomic_read(&g_display_geometry.scale)) {
+        return;
+    }
+
+    qatomic_set(&g_display_geometry.width, g.width);
+    qatomic_set(&g_display_geometry.height, g.height);
+    qatomic_set(&g_display_geometry.interlaced, g.interlaced);
+    qatomic_set(&g_display_geometry.scale, g.scale);
+    qatomic_set(&g_display_geometry.seq,
+                qatomic_read(&g_display_geometry.seq) + 1);
+}
+
+void nv2a_get_display_geometry(NV2ADisplayGeometry *out)
+{
+    out->width = qatomic_read(&g_display_geometry.width);
+    out->height = qatomic_read(&g_display_geometry.height);
+    out->interlaced = qatomic_read(&g_display_geometry.interlaced);
+    out->scale = qatomic_read(&g_display_geometry.scale);
+    out->seq = qatomic_read(&g_display_geometry.seq);
+}
+
+void pgraph_sync_done(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+
+    qemu_mutex_lock(&pg->sync_lock);
+    qatomic_set(&pg->sync_pending, false);
+    qemu_cond_broadcast(&pg->sync_cond);
+    qemu_mutex_unlock(&pg->sync_lock);
+}
+
+bool pgraph_sync_wait(NV2AState *d, int64_t timeout_ns)
+{
+    PGRAPHState *pg = &d->pgraph;
+    int64_t diagnostic_start = groovy_diag_begin();
+    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + timeout_ns;
+
+    if (timeout_ns >= 0) {
+        if (qemu_mutex_trylock(&pg->sync_lock)) {
+            groovy_diag_stage(GROOVY_DIAG_SYNC, diagnostic_start);
+            return false;
+        }
+    } else {
+        qemu_mutex_lock(&pg->sync_lock);
+    }
+    while (qatomic_read(&pg->sync_pending)) {
+        if (timeout_ns < 0) {
+            qemu_cond_wait(&pg->sync_cond, &pg->sync_lock);
+            continue;
+        }
+        int64_t remaining = deadline - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (remaining <= 0) {
+            break;
+        }
+        qemu_cond_timedwait(&pg->sync_cond, &pg->sync_lock,
+                            (remaining + 999999) / 1000000);
+    }
+    bool done = !qatomic_read(&pg->sync_pending);
+    qemu_mutex_unlock(&pg->sync_lock);
+
+    groovy_diag_stage(GROOVY_DIAG_SYNC, diagnostic_start);
+    return done;
+}
+
+int nv2a_get_framebuffer_surface_timeout(int64_t timeout_ns)
 {
     NV2AState *d = g_nv2a;
     PGRAPHState *pg = &d->pgraph;
     int s = 0;
 
-    qemu_mutex_lock(&pg->renderer_lock);
+    int64_t diagnostic_start = groovy_diag_begin();
+    if (timeout_ns >= 0) {
+        if (qemu_mutex_trylock(&pg->renderer_lock)) {
+            groovy_diag_stage(GROOVY_DIAG_RENDERER_LOCK, diagnostic_start);
+            return -1;
+        }
+    } else {
+        qemu_mutex_lock(&pg->renderer_lock);
+    }
+    groovy_diag_stage(GROOVY_DIAG_RENDERER_LOCK, diagnostic_start);
     assert(!pg->framebuffer_in_use);
-    pg->framebuffer_in_use = true;
     if (pg->renderer->ops.get_framebuffer_surface) {
-        s = pg->renderer->ops.get_framebuffer_surface(d);
+        s = pg->renderer->ops.get_framebuffer_surface(d, timeout_ns);
+    }
+    if (s >= 0) {
+        pg->framebuffer_in_use = true;
     }
     qemu_mutex_unlock(&pg->renderer_lock);
 
     return s;
+}
+
+int nv2a_get_framebuffer_surface(void)
+{
+    return nv2a_get_framebuffer_surface_timeout(-1);
 }
 
 void nv2a_release_framebuffer_surface(void)

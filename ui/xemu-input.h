@@ -71,6 +71,10 @@ enum controller_state_axis_index {
 enum controller_input_device_type {
     INPUT_DEVICE_SDL_KEYBOARD,
     INPUT_DEVICE_SDL_GAMEPAD,
+    /* Pads attached to a MiSTer, arriving over the network rather than from
+     * SDL. Appended rather than inserted: the values are written into settings
+     * as port bindings. */
+    INPUT_DEVICE_GROOVY_MISTER,
 };
 
 enum peripheral_type { PERIPHERAL_NONE, PERIPHERAL_XMU, PERIPHERAL_TYPE_COUNT };
@@ -132,6 +136,10 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state);
 void xemu_input_update_sdl_controller_state(ControllerState *state);
 void xemu_input_update_rumble(ControllerState *state);
 ControllerState *xemu_input_get_bound(int index);
+void xemu_input_get_controller_identity(ControllerState *state, char *buf,
+                                        size_t len);
+bool xemu_input_controller_has_mapping(ControllerState *con);
+bool xemu_input_bindings_reload_map(ControllerState *con);
 void xemu_input_bind(int index, ControllerState *state, int save);
 bool xemu_input_bind_xmu(int player_index, int peripheral_port_index,
                          const char *filename, bool is_rebind);

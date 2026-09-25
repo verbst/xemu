@@ -336,6 +336,30 @@ LIBS = [
         version="R575",
         ships_static={windows},
     ),
+    Lib(
+        "groovymister",
+        "https://github.com/psakhis/Groovy_MiSTer",
+        gplv2,
+        license_path="thirdparty/groovymister/groovymister.LICENSE.txt",
+        version="1.0.0-e30af1c",
+        ships_static=all_platforms,
+    ),
+    Lib(
+        "lz4",
+        "https://github.com/lz4/lz4",
+        bsd_2clause,
+        license_path="thirdparty/groovymister/lz4.LICENSE.txt",
+        version="1.9.5",
+        ships_static=all_platforms,
+    ),
+    Lib(
+        "switchres",
+        "https://github.com/antonioginer/switchres",
+        gplv2,
+        license_path="thirdparty/switchres/switchres.LICENSE.txt",
+        version="2.1.0",
+        ships_static=all_platforms,
+    ),
     #
     # Data files included with xemu
     #

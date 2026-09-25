@@ -24,8 +24,7 @@
 
 static void pgraph_null_sync(NV2AState *d)
 {
-    qatomic_set(&d->pgraph.sync_pending, false);
-    qemu_event_set(&d->pgraph.sync_complete);
+    pgraph_sync_done(d);
 }
 
 static void pgraph_null_flush(NV2AState *d)

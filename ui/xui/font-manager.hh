@@ -24,6 +24,7 @@
 #define ICON_BUTTON_B "\xef\xa4\x81"
 #define ICON_BUTTON_X "\xef\xa4\x82"
 #define ICON_BUTTON_Y "\xef\xa4\x83"
+#define ICON_MISTER_KUN "\xef\xa4\x84"
 
 class FontManager
 {

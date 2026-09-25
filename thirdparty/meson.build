@@ -28,3 +28,5 @@ vma = declare_dependency(include_directories: vma_subproj.include_directories('V
 endif
 
 subdir('nvapi')
+subdir('groovymister')
+subdir('switchres')

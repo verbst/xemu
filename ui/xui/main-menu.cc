@@ -20,6 +20,7 @@
 #include "scene-manager.hh"
 #include "widgets.hh"
 #include "main-menu.hh"
+#include "ui/groovy/groovy.h"
 #include "font-manager.hh"
 #include "input-manager.hh"
 #include "snapshot-manager.hh"
@@ -541,7 +542,7 @@ void MainMenuInputView::Draw()
             ImGui::PopStyleVar();
         }
 
-        if (bound_state->type == INPUT_DEVICE_SDL_GAMEPAD) {
+        if (xemu_input_controller_has_mapping(bound_state)) {
             Toggle("Enable Rumble",
                    &bound_state->controller_map->enable_rumble);
             Toggle("Invert Left X Axis",
@@ -631,6 +632,7 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
     };
 
     bool is_keyboard = state->type == INPUT_DEVICE_SDL_KEYBOARD;
+    bool is_groovy = state->type == INPUT_DEVICE_GROOVY_MISTER;
 
     int num_axis_mappings;
     const char *const *axis_index_to_name_map;
@@ -660,7 +662,10 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
         ImGui::TableSetColumnIndex(1);
 
         if (m_rebinding && m_rebinding->GetTableRow() == i) {
-            ImGui::Text("Press a key to rebind");
+            ImGui::Text("%s", m_rebinding->GetPrompt());
+            if (m_rebinding->Poll() == RebindEventResult::Complete) {
+                m_rebinding = nullptr;
+            }
             continue;
         }
 
@@ -692,7 +697,9 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
                 };
 
                 int button = *(button_map[i]);
-                if (button != SDL_GAMEPAD_BUTTON_INVALID) {
+                if (is_groovy) {
+                    remap_button_text = groovy_input_button_name(button);
+                } else if (button != SDL_GAMEPAD_BUTTON_INVALID) {
                     remap_button_text = SDL_GetGamepadStringForButton(
                         static_cast<SDL_GamepadButton>(button));
                 }
@@ -708,7 +715,9 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
               .axis_trigger_right,
           };
           int axis = *(axis_map[i - num_face_buttons]);
-          if (axis != SDL_GAMEPAD_AXIS_INVALID) {
+          if (is_groovy) {
+            remap_button_text = groovy_input_axis_name(axis);
+          } else if (axis != SDL_GAMEPAD_AXIS_INVALID) {
             remap_button_text = SDL_GetGamepadStringForAxis(
                 static_cast<SDL_GamepadAxis>(axis));
           }
@@ -727,6 +736,9 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
           if (is_keyboard) {
             m_rebinding =
               std::make_unique<ControllerKeyboardRebindingMap>(i);
+          } else if (is_groovy) {
+            m_rebinding =
+              std::make_unique<ControllerGroovyRebindingMap>(i, state);
           } else {
             m_rebinding =
               std::make_unique<ControllerGamepadRebindingMap>(i,
@@ -1289,6 +1301,173 @@ int MainMenuSnapshotsView::OnSearchTextUpdate(ImGuiInputTextCallbackData *data)
     return 0;
 }
 
+MainMenuMisterView::MainMenuMisterView()
+{
+    host[0] = '\0';
+}
+
+void MainMenuMisterView::Draw()
+{
+    bool appearing = ImGui::IsWindowAppearing();
+    if (appearing) {
+        strncpy(host, g_config.groovy.host, sizeof(host) - 1);
+        host[sizeof(host) - 1] = '\0';
+    }
+
+    float size_ratio = 0.5;
+    float width = ImGui::GetColumnWidth() * size_ratio;
+
+    SectionTitle("Connection");
+    Toggle("Stream to MiSTer", &g_config.groovy.enable,
+           "Send video, audio and controller input to a MiSTer over the "
+           "network instead of using this window");
+
+    ImGui::PushFont(g_font_mgr.m_menu_font_small);
+    PrepareComboTitleDescription("MiSTer Address",
+                                 "Address of the MiSTer on your network",
+                                 size_ratio);
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::InputText("###mister_host", host, sizeof(host))) {
+        xemu_settings_set_string(&g_config.groovy.host, host);
+    }
+    ImGui::PopFont();
+
+    if (g_config.groovy.enable) {
+        ImGui::PushFont(g_font_mgr.m_menu_font_small);
+        if (groovy_is_streaming()) {
+            const char *mode = groovy_status_mode();
+            ImGui::TextWrapped("Connected. %s", mode ? mode : "");
+        } else {
+            ImGui::TextWrapped("Not connected.");
+        }
+        ImGui::PopFont();
+    }
+
+    Toggle("Reconnect automatically", &g_config.groovy.auto_reconnect,
+           "Rebuild the session by itself if the MiSTer stops responding");
+
+    SectionTitle("Picture");
+    ChevronCombo("Monitor", (int *)&g_config.groovy.modeline.monitor,
+                 "Arcade 15kHz\0Arcade 15kHz extended\0Arcade 15/25kHz\0"
+                 "Arcade 15/31kHz\0Arcade 15/25/31kHz\0Arcade 25kHz\0"
+                 "Arcade 31kHz\0Generic 15kHz\0NTSC\0PAL\0"
+                 "VESA 480\0VESA 600\0VESA 768\0VESA 1024\0Custom\0",
+                 "The kind of display attached to the MiSTer. This decides "
+                 "which video modes are possible");
+
+    ChevronCombo("Mode Priority", (int *)&g_config.groovy.modeline.mode_priority,
+                 "Keep Refresh Rate\0Keep Resolution\0",
+                 "What to give up when the monitor cannot provide both. "
+                 "Keeping the refresh rate preserves emulation speed");
+
+    if (g_config.groovy.modeline.mode_priority ==
+        CONFIG_GROOVY_MODELINE_MODE_PRIORITY_KEEP_RESOLUTION) {
+        ImGui::PushFont(g_font_mgr.m_menu_font_small);
+        ImGui::TextWrapped(
+            "Keeping the resolution can mean a slower refresh rate, which "
+            "slows the game down. Audio is generated in real time and is not "
+            "slowed with it, so anything beyond about 1%% is heard as well as "
+            "seen.");
+        ImGui::PopFont();
+    }
+
+    ChevronCombo("Scan Mode", (int *)&g_config.groovy.modeline.scan_mode,
+                 "Interlaced & Progressive\0Progressive Only\0",
+                 "Progressive only avoids interlace flicker, at half the "
+                 "vertical detail on a 15kHz monitor");
+
+    ChevronCombo("Aspect Ratio", (int *)&g_config.groovy.modeline.aspect,
+                 "Follow Game\0Force 4:3\0Force 16:9\0",
+                 "Shape of the picture the modeline is built for");
+
+    ChevronCombo("Refresh Rate", (int *)&g_config.groovy.modeline.target_refresh,
+                 "Automatic\0NTSC (59.94 Hz)\0Exact 60 Hz\0PAL (50 Hz)\0",
+                 "Automatic reads the rate from the video mode the game "
+                 "selected");
+
+    SectionTitle("Stream");
+    ChevronCombo("Codec", (int *)&g_config.groovy.stream.codec,
+                 "Uncompressed\0LZ4\0LZ4 + delta\0LZ4 HC\0LZ4 HC + delta\0"
+                 "LZ4 adaptive\0LZ4 adaptive + delta\0Near-lossless (NLC)\0",
+                 "Near-lossless is the only option that keeps up with 3D "
+                 "games at 480p");
+
+    bool nlc = g_config.groovy.stream.codec == CONFIG_GROOVY_STREAM_CODEC_NLC;
+    if (nlc) {
+        /* The near-lossless decoder in the MiSTer has three colour planes and
+         * no way to be told about a different pixel format, so it accepts
+         * nothing else and the session would be refused. */
+        g_config.groovy.stream.rgb_mode = CONFIG_GROOVY_STREAM_RGB_MODE_RGB888;
+
+        ChevronCombo("Compression Pack",
+                     (int *)&g_config.groovy.stream.nlc_pack,
+                     "Tiled\0Rice\0",
+                     "Rice needs a MiSTer core built for it. On a core "
+                     "without it the picture is garbage with no error");
+
+        ChevronCombo("Detail", &g_config.groovy.stream.nlc_near_level,
+                     "Lossless\0" "1\0" "2\0" "3\0",
+                     "How much detail may be given up to fit each frame down "
+                     "the wire. Lossless is exact, but its largest frames can "
+                     "outrun what the MiSTer can take. 1 is indistinguishable "
+                     "on a CRT; higher numbers trade picture for bandwidth");
+    } else {
+        ChevronCombo("Colour Depth", (int *)&g_config.groovy.stream.rgb_mode,
+                     "24-bit\0" "32-bit\0" "16-bit\0",
+                     "16-bit halves the bandwidth and adds visible banding");
+    }
+
+    ChevronCombo("Packet Size", (int *)&g_config.groovy.stream.mtu,
+                 "Standard (1500)\0Jumbo (3800)\0",
+                 "Jumbo frames need to be enabled on the MiSTer and on this "
+                 "machine's network adapter");
+
+    SectionTitle("Timing");
+    ChevronCombo("Frame Pacing", (int *)&g_config.groovy.timing.pacing,
+                 "Independent clocks (fallback)\0Follow the display\0",
+                 "Follow the display unless it misbehaves. It gives the game "
+                 "exactly one frame for each frame the monitor draws; "
+                 "independent clocks drift against each other and repeat a "
+                 "frame every few seconds");
+
+    SectionTitle("Sound");
+    Toggle("Send audio", &g_config.groovy.sound.enable,
+           "Play the game's audio through the MiSTer");
+
+    if (g_config.groovy.sound.enable) {
+        ChevronCombo("Buffer", (int *)&g_config.groovy.sound.buffer_ms,
+                     "None\0" "16 ms\0" "32 ms\0" "64 ms\0" "128 ms\0",
+                     "Sound held on the MiSTer so a slow frame does not cut "
+                     "it. More rides out longer stalls and delays the sound "
+                     "by as much");
+        ChevronCombo("This Computer's Speakers",
+                     (int *)&g_config.groovy.sound.local_output,
+                     "Also play here\0Silent\0Off\0",
+                     "Hearing both at once sounds hollow, because they are a "
+                     "fraction of a second apart");
+    }
+
+    SectionTitle("Controllers");
+    Toggle("Use controllers attached to the MiSTer",
+           &g_config.groovy.controls.pads,
+           "Presents them to the game as Xbox controllers");
+    if (g_config.groovy.controls.pads) {
+        Toggle("Vibration", &g_config.groovy.controls.rumble,
+               "Requires a MiSTer core that supports it");
+    }
+
+    SectionTitle("This Window");
+    Toggle("Keep showing the game here", &g_config.groovy.mirror,
+           "Turn off to stop drawing the game in this window while it is on "
+           "the MiSTer. Menus stay available either way");
+
+    SectionTitle("Diagnostics");
+    ChevronCombo("Logging", (int *)&g_config.groovy.log_level,
+                 "Problems only\0Include timing\0Buffered trace\0",
+                 "Buffered trace records controls and timing in memory. Stop "
+                 "streaming to write it to the log; this may take a few seconds");
+}
+
 void MainMenuSnapshotsView::Draw()
 {
     g_snapshot_mgr.Refresh();
@@ -1714,11 +1893,16 @@ MainMenuScene::MainMenuScene()
       m_network_button("Network", ICON_FA_NETWORK_WIRED),
       m_snapshots_button("Snapshots", ICON_FA_CLOCK_ROTATE_LEFT),
       m_system_button("System", ICON_FA_MICROCHIP),
-      m_about_button("About", ICON_FA_CIRCLE_INFO)
+      m_about_button("About", ICON_FA_CIRCLE_INFO),
+      m_mister_button("MiSTer", ICON_MISTER_KUN)
 {
     m_had_focus_last_frame = false;
     m_focus_view = false;
+    /* The two lists are addressed by position, both by the helpers below and
+     * by the last-viewed index kept in the settings, so they are built in the
+     * same order and anything inserted shifts the entries after it. */
     m_tabs.push_back(&m_general_button);
+    m_tabs.push_back(&m_mister_button);
     m_tabs.push_back(&m_input_button);
     m_tabs.push_back(&m_display_button);
     m_tabs.push_back(&m_audio_button);
@@ -1728,6 +1912,7 @@ MainMenuScene::MainMenuScene()
     m_tabs.push_back(&m_about_button);
 
     m_views.push_back(&m_general_view);
+    m_views.push_back(&m_mister_view);
     m_views.push_back(&m_input_view);
     m_views.push_back(&m_display_view);
     m_views.push_back(&m_audio_view);
@@ -1747,17 +1932,17 @@ void MainMenuScene::ShowSettings()
 
 void MainMenuScene::ShowSnapshots()
 {
-    SetNextViewIndexWithFocus(5);
+    SetNextViewIndexWithFocus(6);
 }
 
 void MainMenuScene::ShowSystem()
 {
-    SetNextViewIndexWithFocus(6);
+    SetNextViewIndexWithFocus(7);
 }
 
 void MainMenuScene::ShowAbout()
 {
-    SetNextViewIndexWithFocus(7);
+    SetNextViewIndexWithFocus(8);
 }
 
 void MainMenuScene::SetNextViewIndexWithFocus(int i)

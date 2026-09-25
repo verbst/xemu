@@ -1,0 +1,14 @@
+MiSTer Kun, the mascot of the MiSTer FPGA project.
+
+Artwork by baxysquare, remastered from the original low-resolution samples:
+
+    https://github.com/baxysquare/mister_kun
+
+The author places no formal licence on it, describing the design as a gift to
+the MiSTer community, to be used and remixed as people wish, with a simple
+accreditation appreciated where possible and appropriate. This file is that
+accreditation.
+
+mister_kun.svg is the black-and-white artwork as published. mister_kun.otf is a
+single-glyph font built from it by scripts/gen-mister-kun-font.py, so that the
+MiSTer tab in the settings can draw the mascot as an icon alongside the others.

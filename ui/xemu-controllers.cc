@@ -19,6 +19,7 @@
 
 #include "xemu-controllers.h"
 #include "xemu-settings.h"
+#include "groovy/groovy.h"
 #include <assert.h>
 #include <cmath>
 #include <limits>
@@ -138,4 +139,76 @@ ControllerGamepadRebindingMap::ConsumeRebindEvent(SDL_Event *event)
     default:
         return RebindEventResult::Ignore;
     }
+}
+
+ControllerGroovyRebindingMap::ControllerGroovyRebindingMap(int table_row,
+                                                           ControllerState *state)
+    : RebindingMap(table_row), m_state{ state },
+      m_wants_axis{ table_row >= controller_button_count }
+{
+    groovy_input_capture_begin(m_state->sdl_joystick_id, m_wants_axis);
+}
+
+ControllerGroovyRebindingMap::~ControllerGroovyRebindingMap()
+{
+    // Navigating away leaves no half-finished wait behind to catch the next
+    // press the user makes for some other reason.
+    groovy_input_capture_cancel(m_state->sdl_joystick_id);
+}
+
+const char *ControllerGroovyRebindingMap::GetPrompt() const
+{
+    return m_wants_axis ? "Move a stick or trigger on the MiSTer" :
+                          "Press a button on the MiSTer";
+}
+
+RebindEventResult
+ControllerGroovyRebindingMap::ConsumeRebindEvent(SDL_Event *event)
+{
+    // Nothing this pad does reaches us as an event; see Poll.
+    (void)event;
+    return RebindEventResult::Ignore;
+}
+
+RebindEventResult ControllerGroovyRebindingMap::Poll()
+{
+    int position;
+    if (!groovy_input_capture_press(m_state->sdl_joystick_id, &position)) {
+        return RebindEventResult::Ignore;
+    }
+
+    if (m_wants_axis) {
+        int *axis_map[controller_axes_count] = {
+            &m_state->controller_map->controller_mapping.axis_left_x,
+            &m_state->controller_map->controller_mapping.axis_left_y,
+            &m_state->controller_map->controller_mapping.axis_right_x,
+            &m_state->controller_map->controller_mapping.axis_right_y,
+            &m_state->controller_map->controller_mapping.axis_trigger_left,
+            &m_state->controller_map->controller_mapping.axis_trigger_right,
+        };
+
+        *(axis_map[m_table_row - controller_button_count]) = position;
+        return RebindEventResult::Complete;
+    }
+
+    int *button_map[controller_button_count] = {
+        &m_state->controller_map->controller_mapping.a,
+        &m_state->controller_map->controller_mapping.b,
+        &m_state->controller_map->controller_mapping.x,
+        &m_state->controller_map->controller_mapping.y,
+        &m_state->controller_map->controller_mapping.back,
+        &m_state->controller_map->controller_mapping.guide,
+        &m_state->controller_map->controller_mapping.start,
+        &m_state->controller_map->controller_mapping.lstick_btn,
+        &m_state->controller_map->controller_mapping.rstick_btn,
+        &m_state->controller_map->controller_mapping.lshoulder,
+        &m_state->controller_map->controller_mapping.rshoulder,
+        &m_state->controller_map->controller_mapping.dpad_up,
+        &m_state->controller_map->controller_mapping.dpad_down,
+        &m_state->controller_map->controller_mapping.dpad_left,
+        &m_state->controller_map->controller_mapping.dpad_right,
+    };
+
+    *(button_map[m_table_row]) = position;
+    return RebindEventResult::Complete;
 }

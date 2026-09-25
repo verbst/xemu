@@ -38,6 +38,22 @@ protected:
 public:
     virtual RebindEventResult ConsumeRebindEvent(SDL_Event *event) = 0;
 
+    /*
+     * Checked once per frame while a rebinding is outstanding, for devices
+     * whose input does not arrive as an event. Devices that are driven by
+     * events alone leave this alone.
+     */
+    virtual RebindEventResult Poll()
+    {
+        return RebindEventResult::Ignore;
+    }
+
+    /* Describes what the user is being waited on, for the table cell. */
+    virtual const char *GetPrompt() const
+    {
+        return "Press a key to rebind";
+    }
+
     int GetTableRow() const
     {
         return m_table_row;
@@ -67,6 +83,23 @@ public:
         : RebindingMap(table_row), m_state{ state }, m_seen_key_down{ false }
     {
     }
+};
+
+/*
+ * A pad attached to a MiSTer, whose presses arrive in the video stream's own
+ * packets rather than through SDL. There is no event to consume, so the choice
+ * is polled from what the last packet carried.
+ */
+class ControllerGroovyRebindingMap : public virtual RebindingMap {
+    ControllerState *m_state;
+    bool m_wants_axis;
+
+public:
+    RebindEventResult ConsumeRebindEvent(SDL_Event *event) override;
+    RebindEventResult Poll() override;
+    const char *GetPrompt() const override;
+    ControllerGroovyRebindingMap(int table_row, ControllerState *state);
+    ~ControllerGroovyRebindingMap() override;
 };
 
 #endif // XEMU_CONTROLLERS_H

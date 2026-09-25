@@ -19,6 +19,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "renderer.h"
+#include "ui/groovy/groovy-diagnostics.h"
 
 #include "gloffscreen.h"
 
@@ -109,8 +110,7 @@ static void pgraph_vk_sync(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     pgraph_vk_render_display(pg);
 
-    qatomic_set(&d->pgraph.sync_pending, false);
-    qemu_event_set(&d->pgraph.sync_complete);
+    pgraph_sync_done(d);
 }
 
 static void pgraph_vk_process_pending(NV2AState *d)
@@ -169,12 +169,21 @@ static void pgraph_vk_pre_shutdown_wait(NV2AState *d)
     // qemu_event_wait(&d->pgraph.vk_renderer_state->shader_cache_writeback_complete);   
 }
 
-static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
+static int pgraph_vk_get_framebuffer_surface(NV2AState *d, int64_t timeout_ns)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    int64_t diagnostic_start = groovy_diag_begin();
+    if (timeout_ns >= 0) {
+        if (qemu_mutex_trylock(&d->pfifo.lock)) {
+            groovy_diag_stage(GROOVY_DIAG_FIFO_LOCK, diagnostic_start);
+            return -1;
+        }
+    } else {
+        qemu_mutex_lock(&d->pfifo.lock);
+    }
+    groovy_diag_stage(GROOVY_DIAG_FIFO_LOCK, diagnostic_start);
 
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);
@@ -191,11 +200,12 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
     surface->frame_time = pg->frame_time;
 
 #if HAVE_EXTERNAL_MEMORY
-    qemu_event_reset(&d->pgraph.sync_complete);
     qatomic_set(&pg->sync_pending, true);
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);
-    qemu_event_wait(&d->pgraph.sync_complete);
+    if (!pgraph_sync_wait(d, timeout_ns)) {
+        return -1;
+    }
     return r->display.gl_texture_id;
 #else
     qemu_mutex_unlock(&d->pfifo.lock);

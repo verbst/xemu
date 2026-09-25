@@ -28,7 +28,18 @@ if not fs.exists(lib)
     message('Downloading dsp56300 @0@ for @1@...'.format(ver, rust_target))
     run_command(find_program('curl'), '-fsSL', url, '-o', src_archive, check: true)
   endif
-  run_command('tar', 'xzf', src_archive, '-C', meson.current_build_dir(), check: true)
+  # GNU tar reads an argument containing a colon as host:path and tries to
+  # fetch it over the network, so an absolute Windows path sends it looking for
+  # a machine named after the drive letter. Only GNU tar needs telling, and
+  # only there does the ambiguity arise.
+  # The dash matters: the bundled form without one is only recognised as the
+  # operation when it is the very first argument, so anything placed ahead of
+  # it leaves tar reporting that no operation was given.
+  tar_args = ['-xzf', src_archive, '-C', meson.current_build_dir()]
+  if host_os == 'windows'
+    tar_args = ['--force-local'] + tar_args
+  endif
+  run_command('tar', tar_args, check: true)
 endif
 
 link_args = []

@@ -21,6 +21,8 @@
 
 #include "apu_int.h"
 
+#include "ui/groovy/groovy.h"
+
 MCPXAPUState *g_state; // Used via debug handlers
 
 static void update_irq(MCPXAPUState *d)
@@ -147,7 +149,8 @@ static void throttle_publish_debug(MCPXAPUState *d)
     d->throttle.queued_bytes_count = 0;
 }
 
-static void throttle_record_queue(MCPXAPUState *d, int queued_bytes)
+static void throttle_record_queue(MCPXAPUState *d, int queued_bytes, int low,
+                                  int high)
 {
     if (d->throttle.queued_bytes_count == 0) {
         d->throttle.queued_bytes_min = d->throttle.queued_bytes_max = queued_bytes;
@@ -157,13 +160,33 @@ static void throttle_record_queue(MCPXAPUState *d, int queued_bytes)
     }
     d->throttle.queued_bytes_sum += queued_bytes;
     d->throttle.queued_bytes_count++;
-    if (queued_bytes >= d->monitor.queued_bytes_high) {
+    if (queued_bytes >= high) {
         d->throttle.pacing.backoff++;
-    } else if (queued_bytes <= d->monitor.queued_bytes_low) {
+    } else if (queued_bytes <= low) {
         d->throttle.pacing.speedup++;
     } else {
         d->throttle.pacing.ok++;
     }
+}
+
+/* How far ahead of its consumer the output is, and the band it is held to.
+ * The display's clock takes precedence over the host's sound device while it
+ * is being streamed to, and may report the output behind, as a negative
+ * count. False when neither can say. */
+static bool throttle_queued(MCPXAPUState *d, int *queued_bytes, int *low,
+                            int *high)
+{
+    if (groovy_audio_pacing(queued_bytes, low, high)) {
+        return true;
+    }
+
+    *low = d->monitor.queued_bytes_low;
+    *high = d->monitor.queued_bytes_high;
+    if (d->monitor.stream) {
+        *queued_bytes = SDL_GetAudioStreamQueued(d->monitor.stream);
+        return *queued_bytes >= 0;
+    }
+    return false;
 }
 
 static void throttle(MCPXAPUState *d)
@@ -174,23 +197,21 @@ static void throttle(MCPXAPUState *d)
 
     int64_t start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     throttle_update_debug(d, start_us);
-    int queued_bytes = -1;
+    int queued_bytes = 0, low = 0, high = 0;
+    bool known = throttle_queued(d, &queued_bytes, &low, &high);
 
-    if (d->monitor.stream) {
-        queued_bytes = SDL_GetAudioStreamQueued(d->monitor.stream);
-        if (queued_bytes >= 0) {
-            throttle_record_queue(d, queued_bytes);
+    if (known) {
+        throttle_record_queue(d, queued_bytes, low, high);
+    }
+    while (!d->pause_requested && known && queued_bytes >= high) {
+        qemu_cond_timedwait(&d->cond, &d->lock, EP_FRAME_US / 1000);
+        if (d->pause_requested) {
+            break;
         }
-        while (!d->pause_requested && queued_bytes >= d->monitor.queued_bytes_high) {
-            qemu_cond_timedwait(&d->cond, &d->lock, EP_FRAME_US / 1000);
-            if (d->pause_requested) {
-                break;
-            }
-            queued_bytes = SDL_GetAudioStreamQueued(d->monitor.stream);
-        }
+        known = throttle_queued(d, &queued_bytes, &low, &high);
     }
 
-    if (queued_bytes < 0 || queued_bytes > d->monitor.queued_bytes_low) {
+    if (!known || queued_bytes > low) {
         int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         if (d->next_frame_time_us == 0 ||
             now_us - d->next_frame_time_us > EP_FRAME_US) {
@@ -208,9 +229,8 @@ static void throttle(MCPXAPUState *d)
         d->next_frame_time_us += EP_FRAME_US;
 
         /* Avoid drift toward watermark */
-        if (queued_bytes >= 0) {
-            int mid = (d->monitor.queued_bytes_low +
-                       d->monitor.queued_bytes_high) / 2;
+        if (known) {
+            int mid = (low + high) / 2;
             d->next_frame_time_us += (queued_bytes > mid) - (queued_bytes < mid);
         }
     }
