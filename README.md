@@ -2,7 +2,7 @@
 
 This xemu fork streams Xbox video and audio to a MiSTer running Groovy NLC. It can also use controllers attached to the MiSTer. For MiSTer installation, see [Groovy NLC releases](https://github.com/verbst/Groovy_MiSTer/releases).
 
-Set up xemu's BIOS and disk images as described at [xemu.app](https://xemu.app).
+Set up xemu's BIOS and disk images as described at [xemu.app](https://xemu.app/docs/required-files/).
 
 Open **Settings > MiSTer** in xemu. 
 
